@@ -3,6 +3,8 @@ const { Tmdb } = require('tmdb');
 const inquirer = require('inquirer');
 const _ = require('lodash');
 
+require('dotenv').config();
+
 const genres = require('./genres.json');
 const languages = {
   ch: 'Chinese',
@@ -41,12 +43,13 @@ const getFlagFromLanguage = (language) => {
 
 const Notion = {
   URL: 'https://api.notion.com/v1',
-  API_KEY: '',
+  API_KEY: process.env.NOTION_API_KEY,
+  MOVIE_DB: process.env.NOTION_MOVIE_DB,
 };
 
 const TheMovieDB = {
   URL: 'https://api.themoviedb.org/3',
-  API_KEY: '',
+  API_KEY: process.env.TMDB_API_KEY,
   IMAGE_API_URL: 'https://image.tmdb.org/t/p/w200',
 };
 
@@ -65,14 +68,14 @@ const getNotionMovies = async (pageSize = 100) => {
         //   // multi_select: { is_empty: true },
         //   multi_select: { contains: 'Documentary' },
         // },
-        {
-          property: 'Last Metadata Sync',
-          date: { is_empty: true },
-        },
         // {
-        //   property: 'Type',
-        //   select: { equals: 'Full-length' },
+        //   property: 'Last Metadata Sync',
+        //   date: { is_empty: true },
         // },
+        {
+          property: 'Type',
+          select: { equals: 'Series' },
+        },
         // {
         //   property: 'TMDB Link',
         //   url: { is_empty: true },
@@ -88,24 +91,28 @@ const getNotionMovies = async (pageSize = 100) => {
 
   // Format the rows into a better structure
   const movies = response.results.map((row) => {
-    const { Title, Year } = row.properties;
+    const { Title, Year, Type } = row.properties;
 
     return {
       id: row.id,
       title: Title.title[0].plain_text,
       year: Year.number,
+      type: Type.select.name,
     };
   });
 
   return movies;
 };
 
-const getMovieMetadata = async ({ title: query, year = null, id: notionId }, updatedTitle) => {
+const getMovieMetadata = async ({ title: query, year = null, id: notionId, type }, updatedTitle) => {
+  const isTv = type === 'Series';
+
   // Get the id of movie via search
-  const search = await tmdb.get('search/movie', {
-    query: query.replace(/ \(.+\)$/, ''),
-    year,
-  });
+  const movieParams = { query, year };
+  const tvParams = { query, first_air_date_year: year };
+
+  const path = isTv ? 'search/tv' : 'search/movie';
+  const search = await tmdb.get(path, isTv ? tvParams : movieParams);
 
   if (!search.results.length) {
     const { newSearch } = await inquirer.prompt([{
@@ -125,7 +132,7 @@ const getMovieMetadata = async ({ title: query, year = null, id: notionId }, upd
     }]);
     console.log();
 
-    return getMovieMetadata({ title: newSearch, year: newYear ? +newYear : undefined, id: notionId }, query);
+    return getMovieMetadata({ title: newSearch, year: newYear ? +newYear : undefined, id: notionId, type }, query);
   }
 
   let matchedResultId = search.results[0]?.id;
@@ -137,10 +144,15 @@ const getMovieMetadata = async ({ title: query, year = null, id: notionId }, upd
       prefix: '⚠️  ',
       message: `Multiple results found for ${query}${year ? ` (${year})` : ''}`,
       choices: [
-        ...search.results.map(({ title, releaseDate, originalLanguage, genreIds, id: tmdbId }, index) => ({
-          name: `${getFlagFromLanguage(originalLanguage)}   ${title} [${releaseDate}] - ${genreIds.map(id => genres[id]).join(', ')} (https://themoviedb.org/movie/${tmdbId})`,
-          value: index,
-        })),
+        ...search.results.map(({ originalLanguage, genreIds, id: tmdbId, ...data }, index) => {
+          const title = data.title || data.name;
+          const releaseDate = data.releaseDate || data.firstAirDate;
+
+          return {
+            name: `${getFlagFromLanguage(originalLanguage)}   ${title} [${releaseDate}] - ${genreIds.map(id => genres[id]).join(', ')} (https://themoviedb.org/movie/${tmdbId})`,
+            value: index,
+          };
+        }),
         { name: '⏩  Skip', value: 'skip' },
         { name: '🎬  Enter TMDB ID', value: 'enter-id' },
         ...(year ? [{ name: '🔎  Search without year', value: 'search' }] : []),
@@ -150,7 +162,7 @@ const getMovieMetadata = async ({ title: query, year = null, id: notionId }, upd
 
     // Alternatives
     if (chosenResult === 'skip') return undefined;
-    if (chosenResult === 'search') return getMovieMetadata({ title: query, id: notionId }, query);
+    if (chosenResult === 'search') return getMovieMetadata({ title: query, id: notionId, type }, query);
 
     if (chosenResult === 'enter-id') {
       const { enteredId } = await inquirer.prompt([{
@@ -167,23 +179,25 @@ const getMovieMetadata = async ({ title: query, year = null, id: notionId }, upd
   }
 
   // Get Other Information
-  const movie = await tmdb.get(`movie/${matchedResultId}`, {
+  const infoPath = isTv ? `tv/${matchedResultId}` : `movie/${matchedResultId}`;
+  const movie = await tmdb.get(infoPath, {
     append_to_response: 'videos,credits',
   });
 
   const {
     genres: categories,
     id: tmdbId,
-    originalTitle,
     originalLanguage,
-    title,
     overview,
     posterPath,
-    releaseDate,
   } = movie;
 
+  const originalTitle = movie.originalTitle || movie.originalName;
+  const title = movie.title || movie.name;
+  const releaseDate = movie.releaseDate || movie.firstAirDate;
+
   const { crew } = movie.credits;
-  const directors = crew.filter(({ job }) => job === 'Director');
+  const directors = isTv ? movie.createdBy : crew.filter(({ job }) => job === 'Director');
 
   const { results: videos } = movie.videos;
   const [defaultTrailer] = videos.filter(({ type }) => type === 'Trailer');

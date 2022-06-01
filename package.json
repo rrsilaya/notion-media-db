@@ -12,6 +12,7 @@
   "dependencies": {
     "@notionhq/client": "^1.0.4",
     "axios": "^0.27.2",
+    "dotenv": "^16.0.1",
     "inquirer": "^8.2.4",
     "lodash": "^4.17.21",
     "tmdb": "^2.6.0"
